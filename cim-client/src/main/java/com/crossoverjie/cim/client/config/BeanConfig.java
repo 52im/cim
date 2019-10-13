@@ -1,7 +1,9 @@
 package com.crossoverjie.cim.client.config;
 
 import com.crossoverjie.cim.client.handle.MsgHandleCaller;
+import com.crossoverjie.cim.client.service.impl.MsgCallBackListener;
 import com.crossoverjie.cim.common.constant.Constants;
+import com.crossoverjie.cim.common.data.construct.RingBufferWheel;
 import com.crossoverjie.cim.common.protocol.CIMRequestProto;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import okhttp3.OkHttpClient;
@@ -81,17 +83,33 @@ public class BeanConfig {
         return  productExecutor ;
     }
 
+
+    @Bean("scheduledTask")
+    public ScheduledExecutorService buildSchedule(){
+        ThreadFactory sche = new ThreadFactoryBuilder()
+                .setNameFormat("scheduled-%d")
+                .setDaemon(true)
+                .build();
+        ScheduledExecutorService scheduledExecutorService = new ScheduledThreadPoolExecutor(1,sche) ;
+        return scheduledExecutorService ;
+    }
+
     /**
      * 回调 bean
      * @return
      */
     @Bean
     public MsgHandleCaller buildCaller(){
-        MsgHandleCaller caller = new MsgHandleCaller(msg -> {
-            //处理业务逻辑，或者自定义实现接口
-        }) ;
+        MsgHandleCaller caller = new MsgHandleCaller(new MsgCallBackListener()) ;
 
         return caller ;
+    }
+
+
+    @Bean
+    public RingBufferWheel bufferWheel(){
+        ExecutorService executorService = Executors.newFixedThreadPool(2) ;
+        return new RingBufferWheel(executorService) ;
     }
 
 }

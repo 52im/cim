@@ -1,7 +1,11 @@
 package com.crossoverjie.cim.client.client;
 
+import com.crossoverjie.cim.client.config.AppConfiguration;
 import com.crossoverjie.cim.client.init.CIMClientHandleInitializer;
+import com.crossoverjie.cim.client.service.EchoService;
+import com.crossoverjie.cim.client.service.MsgHandle;
 import com.crossoverjie.cim.client.service.RouteRequest;
+import com.crossoverjie.cim.client.service.impl.ClientInfo;
 import com.crossoverjie.cim.client.vo.req.GoogleProtocolVO;
 import com.crossoverjie.cim.client.vo.req.LoginReqVO;
 import com.crossoverjie.cim.client.vo.res.CIMServerResVO;
@@ -16,6 +20,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,7 +33,7 @@ import javax.annotation.PostConstruct;
  * Function:
  *
  * @author crossoverJie
- *         Date: 22/05/2018 14:19
+ * Date: 22/05/2018 14:19
  * @since JDK 1.8
  */
 @Component
@@ -36,7 +41,7 @@ public class CIMClient {
 
     private final static Logger LOGGER = LoggerFactory.getLogger(CIMClient.class);
 
-    private EventLoopGroup group = new NioEventLoopGroup();
+    private EventLoopGroup group = new NioEventLoopGroup(0, new DefaultThreadFactory("cim-work"));
 
     @Value("${cim.user.id}")
     private long userId;
@@ -47,7 +52,24 @@ public class CIMClient {
     private SocketChannel channel;
 
     @Autowired
+    private EchoService echoService ;
+
+    @Autowired
     private RouteRequest routeRequest;
+
+    @Autowired
+    private AppConfiguration configuration;
+
+    @Autowired
+    private MsgHandle msgHandle;
+
+    @Autowired
+    private ClientInfo clientInfo;
+
+    /**
+     * 重试次数
+     */
+    private int errorCount;
 
     @PostConstruct
     public void start() throws Exception {
@@ -70,15 +92,27 @@ public class CIMClient {
      * @param cimServer
      * @throws InterruptedException
      */
-    private void startClient(CIMServerResVO.ServerInfo cimServer) throws InterruptedException {
+    private void startClient(CIMServerResVO.ServerInfo cimServer) {
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
                 .handler(new CIMClientHandleInitializer())
         ;
 
-        ChannelFuture future = bootstrap.connect(cimServer.getIp(), cimServer.getCimServerPort()).sync();
+        ChannelFuture future = null;
+        try {
+            future = bootstrap.connect(cimServer.getIp(), cimServer.getCimServerPort()).sync();
+        } catch (InterruptedException e) {
+            errorCount++;
+
+            if (errorCount >= configuration.getErrorCount()) {
+                LOGGER.error("连接失败次数达到上限[{}]次", errorCount);
+                msgHandle.shutdown();
+            }
+            LOGGER.error("连接失败", e);
+        }
         if (future.isSuccess()) {
+            echoService.echo("start cim client success!");
             LOGGER.info("启动 cim client 成功");
         }
         channel = (SocketChannel) future.channel();
@@ -90,10 +124,26 @@ public class CIMClient {
      * @return 路由服务器信息
      * @throws Exception
      */
-    private CIMServerResVO.ServerInfo userLogin() throws Exception {
+    private CIMServerResVO.ServerInfo userLogin() {
         LoginReqVO loginReqVO = new LoginReqVO(userId, userName);
-        CIMServerResVO.ServerInfo cimServer = routeRequest.getCIMServer(loginReqVO);
-        LOGGER.info("cimServer=[{}]", cimServer.toString());
+        CIMServerResVO.ServerInfo cimServer = null;
+        try {
+            cimServer = routeRequest.getCIMServer(loginReqVO);
+
+            //保存系统信息
+            clientInfo.saveServiceInfo(cimServer.getIp() + ":" + cimServer.getCimServerPort())
+                    .saveUserInfo(userId, userName);
+
+            LOGGER.info("cimServer=[{}]", cimServer.toString());
+        } catch (Exception e) {
+            errorCount++;
+
+            if (errorCount >= configuration.getErrorCount()) {
+                LOGGER.error("重连次数达到上限[{}]次", errorCount);
+                msgHandle.shutdown();
+            }
+            LOGGER.error("login fail", e);
+        }
         return cimServer;
     }
 
@@ -108,7 +158,8 @@ public class CIMClient {
                 .build();
         ChannelFuture future = channel.writeAndFlush(login);
         future.addListener((ChannelFutureListener) channelFuture ->
-                LOGGER.info("注册成功={}", login.toString()));
+                        echoService.echo("registry cim server success!")
+                );
     }
 
     /**
@@ -145,11 +196,27 @@ public class CIMClient {
 
     }
 
+
+    public void reconnect() throws Exception {
+        if (channel != null && channel.isActive()) {
+            return;
+        }
+        //首先清除路由信息，下线
+        routeRequest.offLine();
+
+        LOGGER.info("reconnect....");
+        start();
+        LOGGER.info("reconnect success");
+    }
+
     /**
      * 关闭
+     *
      * @throws InterruptedException
      */
     public void close() throws InterruptedException {
-        channel.close() ;
+        if (channel != null){
+            channel.close();
+        }
     }
 }
